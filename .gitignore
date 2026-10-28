@@ -1,0 +1,6 @@
+data/*.csv
+models/*.pkl
+*.pyc
+__pycache__/
+.dvc/
+.churn/
