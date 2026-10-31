@@ -11,8 +11,6 @@ env:
   AWS_REGION: ap-south-1
   ECR_REPOSITORY: churn-predictor
   DVC_REMOTE: s3://churn-model-dvc-bucket
-  MODEL_PATH: models/churn_model.joblib
-  MANIFEST_PATH: k8s-manifests/inference.yaml
 
 jobs:
   train-build-deploy:
@@ -41,13 +39,6 @@ jobs:
           pip3 install -r requirements.txt
           pip3 install "dvc[s3]" joblib
 
-      # 3. Configure AWS using GitHub OIDC
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
-
       # 4. Generate dataset
       - name: Generate dataset
         run: |
@@ -60,67 +51,29 @@ jobs:
           mkdir models && cd models
           python3 train.py
 
-      # 6. Version model with DVC and push to S3
-      - name: Configure DVC remote
+      # 3. Configure AWS using GitHub OIDC
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+      
+      - name: push model to s3
         run: |
-          dvc init
-          dvc remote modify origin region "$AWS_REGION"
+          aws s3 cp models/churn_model.pkl s3://churn-model-dvc-bucket/models/churn_model.pkl
+          echo "Model pushed to S3 successfully."
 
-      - name: Track and push model
+      - name: Update inference.yaml with s3 model path
+        run: | 
+          MODEL_URI="s3://churn-model-dvc-bucket/models/churn_model.pkl"
+          sed -i "s|storageUri: .*|storageUri: $MODEL_URI|g" k8s-manifests/inference.yaml
+
+      - name: Commit inference.yaml changes
         run: |
-          dvc add data/churn_data.csv
-          dvc push
+          git config user.name "action@github.com"
+          git config user.email "Github Action"
+          git add k8s-manifests/inference.yaml
 
-      # 7. Build a unique image tag
-      - name: Set image tag
-        id: image
-        run: |
-          echo "tag=${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
-
-      # 8. Authenticate Docker to Amazon ECR
-      - name: Login to Amazon ECR
-        id: ecr
-        uses: aws-actions/amazon-ecr-login@v2
-
-      # 9. Build and push image
-      - name: Build and push image
-        env:
-          REGISTRY: ${{ steps.ecr.outputs.registry }}
-          IMAGE_TAG: ${{ steps.image.outputs.tag }}
-        run: |
-          docker build \
-            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
-            -t "$REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" .
-
-          docker push "$REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
-
-          echo "IMAGE_URI=$REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" \
-            >> "$GITHUB_ENV"
-
-      # 10. Update the image in the Kubernetes manifest
-      - name: Update InferenceService manifest
-        env:
-          IMAGE_TAG: ${{ steps.image.outputs.tag }}
-        run: |
-          IMAGE_URI="${{ steps.ecr.outputs.registry }}/${ECR_REPOSITORY}:${IMAGE_TAG}"
-
-          # Requires yq v4
-          yq -i \
-            '.spec.predictor.containers[0].image = strenv(IMAGE_URI)' \
-            "$MANIFEST_PATH"
-
-      # 11. Commit model pointer and manifest changes
-      - name: Commit GitOps changes
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email \
-            "41898282+github-actions[bot]@users.noreply.github.com"
-
-          git add "$MANIFEST_PATH" models/churn_model.joblib.dvc
-
-          if ! git diff --cached --quiet; then
-            git commit -m "Deploy churn model ${GITHUB_SHA::12}"
-            git push origin HEAD:main
-          else
-            echo "No GitOps changes to commit"
-          fi
+          git commit -m "Update inference.yaml with S3 path [skip ci]" || echo "No changes"
+          git push || echo "No changes to commit in inference.yaml"
