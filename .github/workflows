@@ -1,0 +1,134 @@
+
+name: Churn Prediction MLOps Pipeline
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "src/**"
+      - "requirements.txt"
+      - "Dockerfile"
+      - "dvc.yaml"
+      - ".github/workflows/mlops-pipeline.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  id-token: write
+
+env:
+  AWS_REGION: ap-south-1
+  ECR_REPOSITORY: churn-predictor
+  DVC_REMOTE: s3://churn-model-dvc-bucket
+  MODEL_PATH: models/churn_model.joblib
+  MANIFEST_PATH: k8s/inference.yaml
+
+jobs:
+  train-build-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Checkout repository
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      # 2. Set up Python
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          pip3 install -r requirements.txt
+          pip3 install "dvc[s3]" joblib
+
+      # 3. Configure AWS using GitHub OIDC
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # 4. Generate dataset
+      - name: Generate dataset
+        run: |
+          mkdir data && cd data
+          python3 generate_data.py
+
+      # 5. Train model
+      - name: Train model
+        run: |
+          mkdir models && cd models
+          python3 train.py
+
+      # 6. Version model with DVC and push to S3
+      - name: Configure DVC remote
+        run: |
+          dvc init
+          dvc remote modify origin region "$AWS_REGION"
+
+      - name: Track and push model
+        run: |
+          dvc add data/churn_data.csv
+          dvc push
+
+      # 7. Build a unique image tag
+      - name: Set image tag
+        id: image
+        run: |
+          echo "tag=${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+
+      # 8. Authenticate Docker to Amazon ECR
+      - name: Login to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # 9. Build and push image
+      - name: Build and push image
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+          IMAGE_TAG: ${{ steps.image.outputs.tag }}
+        run: |
+          docker build \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            -t "$REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" .
+
+          docker push "$REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+
+          echo "IMAGE_URI=$REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" \
+            >> "$GITHUB_ENV"
+
+      # 10. Update the image in the Kubernetes manifest
+      - name: Update InferenceService manifest
+        env:
+          IMAGE_TAG: ${{ steps.image.outputs.tag }}
+        run: |
+          IMAGE_URI="${{ steps.ecr.outputs.registry }}/${ECR_REPOSITORY}:${IMAGE_TAG}"
+
+          # Requires yq v4
+          yq -i \
+            '.spec.predictor.containers[0].image = strenv(IMAGE_URI)' \
+            "$MANIFEST_PATH"
+
+      # 11. Commit model pointer and manifest changes
+      - name: Commit GitOps changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add "$MANIFEST_PATH" models/churn_model.joblib.dvc
+
+          if ! git diff --cached --quiet; then
+            git commit -m "Deploy churn model ${GITHUB_SHA::12}"
+            git push origin HEAD:main
+          else
+            echo "No GitOps changes to commit"
+          fi
