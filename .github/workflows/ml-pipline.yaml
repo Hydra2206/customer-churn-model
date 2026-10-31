@@ -22,7 +22,7 @@ env:
   ECR_REPOSITORY: churn-predictor
   DVC_REMOTE: s3://churn-model-dvc-bucket
   MODEL_PATH: models/churn_model.joblib
-  MANIFEST_PATH: k8s/inference.yaml
+  MANIFEST_PATH: k8s-manifests/inference.yaml
 
 jobs:
   train-build-deploy:
