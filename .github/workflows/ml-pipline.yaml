@@ -5,17 +5,7 @@ on:
   push:
     branches:
       - main
-    paths:
-      - "src/**"
-      - "requirements.txt"
-      - "Dockerfile"
-      - "dvc.yaml"
-      - ".github/workflows/mlops-pipeline.yml"
   workflow_dispatch:
-
-permissions:
-  contents: write
-  id-token: write
 
 env:
   AWS_REGION: ap-south-1
@@ -27,6 +17,8 @@ env:
 jobs:
   train-build-deploy:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
       # 1. Checkout repository
