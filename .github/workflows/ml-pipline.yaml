@@ -9,8 +9,6 @@ on:
 
 env:
   AWS_REGION: ap-south-1
-  ECR_REPOSITORY: churn-predictor
-  DVC_REMOTE: s3://churn-model-dvc-bucket
 
 jobs:
   train-build-deploy:
@@ -37,8 +35,7 @@ jobs:
         run: |
           python3 -m pip install --upgrade pip
           pip3 install -r requirements.txt
-          pip3 install "dvc[s3]" joblib
-
+          
       # 4. Generate dataset
       - name: Generate dataset
         run: |
